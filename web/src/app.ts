@@ -14,6 +14,7 @@ import "monaco-editor/languages/definitions/shell/register.js";
 import "monaco-editor/languages/definitions/typescript/register.js";
 import "monaco-editor/languages/definitions/yaml/register.js";
 import type { ChangedFile, FileContents, HostMessage, ReviewComment, ReviewMode, WorkspaceState } from "../../src/types.js";
+import { appearance, applyAppearance } from "./appearance.js";
 
 declare global {
   interface Window {
@@ -23,6 +24,8 @@ declare global {
     MonacoEnvironment: { getWorker(): Worker };
   }
 }
+
+applyAppearance();
 
 let workerUrl: string | null = null;
 window.MonacoEnvironment = {
@@ -89,31 +92,42 @@ let toastTimer = 0;
 let readyTimer = 0;
 const collapsedDirs = new Set<string>();
 
+const monacoToken = (color: string): string => color.replace(/^#/, "");
+const editorColors = appearance.colors.editor;
+const syntaxColors = appearance.colors.syntax;
+
 monaco.editor.defineTheme("review-loop", {
-  base: "vs-dark",
+  base: appearance.mode === "dark" ? "vs-dark" : "vs",
   inherit: true,
   rules: [
-    { token: "comment", foreground: "667085" },
-    { token: "keyword", foreground: "BB9AF7" },
-    { token: "string", foreground: "9ECE6A" },
-    { token: "number", foreground: "FF9E64" },
-    { token: "type", foreground: "7DCFFF" },
+    { token: "", foreground: monacoToken(syntaxColors.foreground) },
+    { token: "comment", foreground: monacoToken(syntaxColors.comment) },
+    { token: "keyword", foreground: monacoToken(syntaxColors.keyword) },
+    { token: "string", foreground: monacoToken(syntaxColors.string) },
+    { token: "number", foreground: monacoToken(syntaxColors.number) },
+    { token: "type", foreground: monacoToken(syntaxColors.type) },
+    { token: "type.identifier", foreground: monacoToken(syntaxColors.type) },
+    { token: "function", foreground: monacoToken(syntaxColors.function) },
+    { token: "identifier", foreground: monacoToken(syntaxColors.variable) },
+    { token: "operator", foreground: monacoToken(syntaxColors.operator) },
+    { token: "delimiter", foreground: monacoToken(syntaxColors.punctuation) },
   ],
   colors: {
-    "editor.background": "#0d1016",
-    "editorGutter.background": "#0d1016",
-    "editorLineNumber.foreground": "#465064",
-    "editorLineNumber.activeForeground": "#9aa5b5",
-    "editor.selectionBackground": "#33415c88",
-    "editor.lineHighlightBackground": "#151a23",
-    "diffEditor.insertedTextBackground": "#2d6a4f38",
-    "diffEditor.removedTextBackground": "#8f3a4b38",
-    "diffEditor.insertedLineBackground": "#19382c55",
-    "diffEditor.removedLineBackground": "#41212a55",
-    "diffEditor.diagonalFill": "#202734",
-    "scrollbarSlider.background": "#30394988",
-    "scrollbarSlider.hoverBackground": "#3d485bAA",
-    "editorOverviewRuler.border": "#00000000",
+    "editor.background": editorColors.background,
+    "editor.foreground": editorColors.foreground,
+    "editorGutter.background": editorColors.gutterBackground,
+    "editorLineNumber.foreground": editorColors.lineNumber,
+    "editorLineNumber.activeForeground": editorColors.activeLineNumber,
+    "editor.selectionBackground": editorColors.selectionBackground,
+    "editor.lineHighlightBackground": editorColors.lineHighlightBackground,
+    "diffEditor.insertedTextBackground": editorColors.insertedTextBackground,
+    "diffEditor.removedTextBackground": editorColors.removedTextBackground,
+    "diffEditor.insertedLineBackground": editorColors.insertedLineBackground,
+    "diffEditor.removedLineBackground": editorColors.removedLineBackground,
+    "diffEditor.diagonalFill": editorColors.diagonalFill,
+    "scrollbarSlider.background": editorColors.scrollbarSlider,
+    "scrollbarSlider.hoverBackground": editorColors.scrollbarSliderHover,
+    "editorOverviewRuler.border": editorColors.overviewRulerBorder,
   },
 });
 monaco.editor.setTheme("review-loop");
@@ -137,9 +151,9 @@ const diffEditor = monaco.editor.createDiffEditor(editorEl, {
   diffWordWrap: "off",
   hideUnchangedRegions: { enabled: false },
   padding: { top: 8, bottom: 8 },
-  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-  fontSize: 12,
-  lineHeight: 19,
+  fontFamily: appearance.typography.codeFontFamily,
+  fontSize: appearance.typography.editorFontSize,
+  lineHeight: appearance.typography.editorLineHeight,
 });
 
 let originalModel: monaco.editor.ITextModel | null = null;
