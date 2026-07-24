@@ -127,9 +127,9 @@ The review window closes when pi shuts down, switches sessions, or reloads exten
 ```sh
 git clone https://github.com/earendil-works/pi-review-loop
 cd pi-review-loop
-npm install
-npm run build
-npm test
+pnpm install
+pnpm run build
+pnpm test
 pi -e ./src/index.ts
 ```
 
@@ -140,4 +140,4 @@ cd ~/workspaces/some-project
 pi -e ../pi-review-loop
 ```
 
-After changing `web/src`, run `npm run build:web`; the extension serves the generated self-contained `web/dist/index.html`.
+After changing `web/src`, run `make ui` (or `pnpm run build:web`); the extension serves the generated self-contained `web/dist/index.html`.

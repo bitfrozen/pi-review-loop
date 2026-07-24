@@ -3,6 +3,7 @@
   "version": "0.3.0",
   "description": "A persistent incremental diff review loop for pi",
   "type": "module",
+  "packageManager": "pnpm@11.1.1",
   "license": "MIT",
   "repository": "github:earendil-works/pi-review-loop",
   "files": [
@@ -21,8 +22,8 @@
     "build:web": "node scripts/build-web.mjs",
     "check": "tsc --noEmit",
     "test": "node --import tsx --test test/*.test.ts",
-    "build": "npm run build:web && npm run check",
-    "prepublishOnly": "npm run build && npm test"
+    "build": "pnpm run build:web && pnpm run check",
+    "prepublishOnly": "pnpm run build && pnpm run test"
   },
   "dependencies": {
     "chokidar": "^5.0.0",
