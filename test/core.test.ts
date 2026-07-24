@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { composeFeedback } from "../src/prompt.js";
+import { getReviewHtmlPath } from "../src/ui.js";
 import { createCheckpoint, decodeStored, parsePorcelainPaths, scanAgainstCheckpoint } from "../src/git.js";
 import { WorkspaceModel } from "../src/workspace.js";
 
@@ -53,8 +53,7 @@ test("formats compact actionable feedback", () => {
 });
 
 test("bundled webview is self-contained and syntactically valid", async () => {
-  const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-  const html = await readFile(join(projectRoot, "web/dist/index.html"), "utf8");
+  const html = await readFile(getReviewHtmlPath(), "utf8");
   assert.doesNotMatch(html, /__[A-Z_]+__/);
 
   const appMatch = html.match(/\(0, eval\)\(atob\("([A-Za-z0-9+/=]+)"\)\)/);

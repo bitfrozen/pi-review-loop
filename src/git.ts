@@ -27,6 +27,19 @@ function splitZero(value: string): string[] {
   return value.split("\0").filter(Boolean);
 }
 
+export function parseIgnoredDirectoryPaths(output: string): string[] {
+  return [...new Set(splitZero(output)
+    .filter((path) => path.endsWith("/"))
+    .map((path) => path.slice(0, -1).replace(/^\.\//, ""))
+    .filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b));
+}
+
+export async function getIgnoredDirectoryPaths(pi: ExtensionAPI, repoRoot: string): Promise<string[]> {
+  const output = await git(pi, repoRoot, ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"]);
+  return parseIgnoredDirectoryPaths(output);
+}
+
 export async function getRepoRoot(pi: ExtensionAPI, cwd: string): Promise<string> {
   const root = await git(pi, cwd, ["rev-parse", "--show-toplevel"]);
   return root.trim();

@@ -81,6 +81,12 @@ Both sidebar sections follow the active diff mode:
 
 Review Loop does not parse or attribute pi tool calls. Any on-disk change—whether made by the agent, the user, or another process—updates the viewer. Deleted files use their parent directory's modification time as an ordering fallback.
 
+## Filesystem watching
+
+Before starting its watcher, Review Loop asks Git for ignored directory roots using the repository's standard exclude rules. It does not descend into those directories or follow directory symlinks, so generated dependency and build trees do not consume watcher resources or trigger refreshes.
+
+The review window opens only after the watcher is ready. If watcher startup or runtime fails, Review Loop reports the error and cleans up its resources instead of terminating pi. Transient workspace refresh errors are reported and retried after the next relevant change. Run `/diff-review` again after correcting a watcher failure.
+
 ## Diff controls
 
 - `Cmd+F` on macOS, or `Ctrl+F` elsewhere: search within the focused diff pane

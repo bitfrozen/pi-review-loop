@@ -1,11 +1,11 @@
 import { relative, sep } from "node:path";
-import { watch, type FSWatcher } from "chokidar";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { open, type GlimpseWindow } from "glimpseui";
-import { createCheckpoint, getRepoRoot } from "./git.js";
+import { createCheckpoint, getIgnoredDirectoryPaths, getRepoRoot } from "./git.js";
 import { composeFeedback } from "./prompt.js";
 import type { HostMessage, ReviewCheckpoint, WindowMessage } from "./types.js";
-import { loadReviewHtml } from "./ui.js";
+import { getReviewHtmlPath } from "./ui.js";
+import { startRepositoryWatcher, type RepositoryWatcher } from "./watcher.js";
 import { WorkspaceModel } from "./workspace.js";
 
 export const CHECKPOINT_ENTRY = "review-loop/checkpoint";
@@ -35,18 +35,29 @@ function parseMessage(value: unknown): WindowMessage | null {
   return value as WindowMessage;
 }
 
+export interface ReviewControllerDependencies {
+  openWindow?: typeof open;
+  startWatcher?: typeof startRepositoryWatcher;
+}
+
 export class ReviewController {
   private window: GlimpseWindow | null = null;
-  private watcher: FSWatcher | null = null;
+  private watcher: RepositoryWatcher | null = null;
   private model: WorkspaceModel | null = null;
   private repoRoot = "";
   private refreshTimer: NodeJS.Timeout | null = null;
   private operation = Promise.resolve();
   private submitting = false;
+  private opening = false;
+  private pendingRefresh = false;
+  private watcherFailure: Error | null = null;
+  private refreshErrorNotified = false;
+  private generation = 0;
 
   constructor(
     private readonly pi: ExtensionAPI,
     private readonly onClosed: () => void,
+    private readonly dependencies: ReviewControllerDependencies = {},
   ) {}
 
   get isOpen(): boolean {
@@ -59,50 +70,96 @@ export class ReviewController {
       ctx.ui.notify("Review Loop is already open.", "info");
       return;
     }
+    if (this.opening) {
+      ctx.ui.notify("Review Loop is already opening.", "info");
+      return;
+    }
 
-    this.repoRoot = await getRepoRoot(this.pi, ctx.cwd);
-    this.model = await WorkspaceModel.create(this.pi, this.repoRoot, latestCheckpoint(ctx, this.repoRoot));
-    await this.model.refresh();
-    await this.startWatcher();
+    this.opening = true;
+    const generation = ++this.generation;
+    this.pendingRefresh = false;
+    this.watcherFailure = null;
+    this.refreshErrorNotified = false;
 
-    const window = open(loadReviewHtml(), { width: 1480, height: 920, title: "Review Loop" });
-    this.window = window;
-    window.on("message", (value) => {
-      const message = parseMessage(value);
-      if (message != null) void this.handleMessage(message, ctx);
-    });
-    window.on("closed", () => this.disposeWindow(window));
-    window.on("error", (error) => {
-      ctx.ui.notify(`Review Loop failed: ${error.message}`, "error");
-      this.disposeWindow(window);
-    });
+    try {
+      this.repoRoot = await getRepoRoot(this.pi, ctx.cwd);
+      if (generation !== this.generation) return;
 
-    ctx.ui.notify("Opened Review Loop.", "info");
+      const [model, ignoredDirectories] = await Promise.all([
+        WorkspaceModel.create(this.pi, this.repoRoot, latestCheckpoint(ctx, this.repoRoot)),
+        getIgnoredDirectoryPaths(this.pi, this.repoRoot),
+      ]);
+      if (generation !== this.generation) return;
+
+      const watcher = await (this.dependencies.startWatcher ?? startRepositoryWatcher)({
+        repoRoot: this.repoRoot,
+        ignoredDirectories,
+        onChange: (path) => {
+          if (generation !== this.generation || this.toRepoPath(path) == null) return;
+          if (this.window == null) {
+            this.pendingRefresh = true;
+            return;
+          }
+          this.scheduleRefresh(ctx);
+        },
+        onError: (error) => {
+          if (generation === this.generation) this.handleWatcherFailure(error, ctx);
+        },
+      });
+      if (generation !== this.generation) {
+        await watcher.close();
+        return;
+      }
+
+      this.model = model;
+      this.watcher = watcher;
+      await model.refresh();
+      if (generation !== this.generation) return;
+      if (this.watcherFailure != null) throw this.watcherFailure;
+
+      const window = (this.dependencies.openWindow ?? open)("", { width: 1480, height: 920, title: "Review Loop" });
+      this.window = window;
+      window.on("message", (value) => {
+        const message = parseMessage(value);
+        if (message != null) void this.handleMessage(message, ctx);
+      });
+      window.on("closed", () => this.disposeWindow(window));
+      window.on("error", (error) => {
+        ctx.ui.notify(`Review Loop failed: ${error.message}`, "error");
+        this.disposeWindow(window, true);
+      });
+      window.once("ready", () => {
+        if (this.window !== window) return;
+        try {
+          window.loadFile(getReviewHtmlPath());
+        } catch (error) {
+          ctx.ui.notify(`Review Loop failed to load: ${error instanceof Error ? error.message : String(error)}`, "error");
+          this.disposeWindow(window, true);
+        }
+      });
+
+      if (this.pendingRefresh) {
+        this.pendingRefresh = false;
+        this.scheduleRefresh(ctx);
+      }
+      ctx.ui.notify("Opened Review Loop.", "info");
+    } catch (error) {
+      if (generation === this.generation) {
+        const resources = this.detachState();
+        await resources.watcher?.close();
+        try { resources.window?.close(); } catch {}
+      }
+      throw error;
+    } finally {
+      if (generation === this.generation) this.opening = false;
+    }
   }
 
   async close(): Promise<void> {
-    if (this.refreshTimer != null) clearTimeout(this.refreshTimer);
-    this.refreshTimer = null;
-    await this.watcher?.close();
-    this.watcher = null;
-    const window = this.window;
-    this.window = null;
-    try { window?.close(); } catch {}
-  }
-
-  private async startWatcher(): Promise<void> {
-    this.watcher = watch(this.repoRoot, {
-      ignoreInitial: true,
-      ignored: (path) => {
-        const rel = relative(this.repoRoot, path);
-        return rel === ".git" || rel.startsWith(`.git${sep}`) || rel === "node_modules" || rel.startsWith(`node_modules${sep}`);
-      },
-    });
-    this.watcher.on("all", (_event, path) => {
-      const repoPath = this.toRepoPath(path);
-      if (repoPath == null) return;
-      this.scheduleRefresh();
-    });
+    this.opening = false;
+    const resources = this.detachState();
+    await resources.watcher?.close();
+    try { resources.window?.close(); } catch {}
   }
 
   private toRepoPath(absolutePath: string): string | null {
@@ -111,20 +168,35 @@ export class ReviewController {
     return path.split(sep).join("/");
   }
 
-  private scheduleRefresh(): void {
+  private scheduleRefresh(ctx: ExtensionCommandContext): void {
     if (this.refreshTimer != null) clearTimeout(this.refreshTimer);
+    const generation = this.generation;
     this.refreshTimer = setTimeout(() => {
       this.refreshTimer = null;
       this.enqueue(async () => {
-        if (this.model == null) return;
-        const state = await this.model.refresh();
+        const model = this.model;
+        if (model == null || generation !== this.generation) return;
+        const state = await model.refresh();
+        if (model !== this.model || generation !== this.generation) return;
+        this.refreshErrorNotified = false;
         this.send({ type: "workspace", state });
+      }, (error) => {
+        if (generation !== this.generation || this.window == null || this.refreshErrorNotified) return;
+        this.refreshErrorNotified = true;
+        ctx.ui.notify(`Review Loop could not refresh: ${error instanceof Error ? error.message : String(error)}`, "error");
       });
     }, 100);
   }
 
-  private enqueue(task: () => Promise<void>): void {
-    this.operation = this.operation.then(task, task).catch(() => {});
+  private enqueue(task: () => Promise<void>, onError: (error: unknown) => void): void {
+    const run = async (): Promise<void> => {
+      try {
+        await task();
+      } catch (error) {
+        try { onError(error); } catch {}
+      }
+    };
+    this.operation = this.operation.then(run, run);
   }
 
   private async handleMessage(message: WindowMessage, ctx: ExtensionCommandContext): Promise<void> {
@@ -176,13 +248,38 @@ export class ReviewController {
     try { this.window.send(`window.__reviewReceive(${payload})`); } catch {}
   }
 
-  private disposeWindow(window: GlimpseWindow): void {
-    if (this.window !== window) return;
+  private handleWatcherFailure(error: Error, ctx: ExtensionCommandContext): void {
+    this.watcherFailure = error;
+    const window = this.window;
+    if (window == null) return;
+    ctx.ui.notify(`Review Loop stopped watching files: ${error.message}`, "error");
+    this.disposeWindow(window, true);
+  }
+
+  private detachState(): { window: GlimpseWindow | null; watcher: RepositoryWatcher | null } {
+    const resources = { window: this.window, watcher: this.watcher };
     this.window = null;
+    this.watcher = null;
+    this.model = null;
+    this.pendingRefresh = false;
+    this.watcherFailure = null;
+    this.refreshErrorNotified = false;
+    this.submitting = false;
+    this.opening = false;
+    this.generation += 1;
     if (this.refreshTimer != null) clearTimeout(this.refreshTimer);
     this.refreshTimer = null;
-    void this.watcher?.close();
-    this.watcher = null;
+    this.operation = Promise.resolve();
+    return resources;
+  }
+
+  private disposeWindow(window: GlimpseWindow, closeWindow = false): void {
+    if (this.window !== window) return;
+    const resources = this.detachState();
+    if (closeWindow) {
+      try { resources.window?.close(); } catch {}
+    }
+    void resources.watcher?.close();
     this.onClosed();
   }
 }
