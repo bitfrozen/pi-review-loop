@@ -630,6 +630,9 @@ function inlineCommentElement(comment: UiComment, editor: monaco.editor.ICodeEdi
   textarea.dataset.commentId = comment.id;
   textarea.rows = 3;
   textarea.placeholder = "Leave actionable feedback…";
+  textarea.spellcheck = false;
+  textarea.setAttribute("autocorrect", "off");
+  textarea.autocapitalize = "off";
   textarea.value = comment.body;
   textarea.addEventListener("input", () => {
     comment.body = textarea.value;
