@@ -28,11 +28,31 @@ export interface FileContents {
   modifiedContent: string;
 }
 
+export interface FileCommentAnchor {
+  kind: "file";
+}
+
+export interface LineCommentAnchor {
+  kind: "line";
+  line: number;
+}
+
+export interface RangeCommentAnchor {
+  kind: "range";
+  startLine: number;
+  startColumn: number;
+  endLine: number;
+  endColumn: number;
+  selectedText: string;
+}
+
+export type ReviewCommentAnchor = FileCommentAnchor | LineCommentAnchor | RangeCommentAnchor;
+
 export interface ReviewComment {
   path: string;
   mode?: ReviewMode;
   side: "original" | "modified" | "file";
-  line: number | null;
+  anchor: ReviewCommentAnchor;
   body: string;
 }
 

@@ -13,7 +13,8 @@ import "monaco-editor/languages/definitions/rust/register.js";
 import "monaco-editor/languages/definitions/shell/register.js";
 import "monaco-editor/languages/definitions/typescript/register.js";
 import "monaco-editor/languages/definitions/yaml/register.js";
-import type { ChangedFile, FileContents, HostMessage, ReviewComment, ReviewMode, WorkspaceState } from "../../src/types.js";
+import { sameReviewTarget } from "../../src/review-comments.js";
+import type { ChangedFile, FileContents, HostMessage, LineCommentAnchor, RangeCommentAnchor, ReviewComment, ReviewMode, WorkspaceState } from "../../src/types.js";
 import { appearance, applyAppearance } from "./appearance.js";
 
 declare global {
@@ -75,8 +76,29 @@ let mountedMode: ReviewMode | null = null;
 const scrollPositions = new Map<string, ScrollPosition>();
 let activeRequestId = "";
 let requestCounter = 0;
-interface UiComment extends ReviewComment { id: string }
-interface ActiveViewZone { id: string; editor: monaco.editor.ICodeEditor; domNode: HTMLElement }
+type InlineCommentSide = "original" | "modified";
+type InlineReviewComment = ReviewComment & {
+  side: InlineCommentSide;
+  anchor: LineCommentAnchor | RangeCommentAnchor;
+};
+type UiComment = ReviewComment & { id: string };
+type UiInlineComment = UiComment & InlineReviewComment;
+interface MountedCommentWidget {
+  editor: monaco.editor.ICodeEditor;
+  widget: monaco.editor.IContentWidget;
+  kind: "icon" | "editor";
+  domNode: HTMLElement;
+}
+interface MountedSelectionWidget {
+  editor: monaco.editor.ICodeEditor;
+  widget: monaco.editor.IContentWidget;
+}
+interface ActiveTextSelection {
+  path: string;
+  mode: ReviewMode;
+  side: InlineCommentSide;
+  anchor: RangeCommentAnchor;
+}
 interface ScrollPosition {
   originalTop: number;
   originalLeft: number;
@@ -86,7 +108,12 @@ interface ScrollPosition {
 
 let comments: UiComment[] = [];
 let draft: Omit<UiComment, "body" | "id"> | null = null;
-let activeViewZones: ActiveViewZone[] = [];
+let activeCommentId: string | null = null;
+let activeTextSelection: ActiveTextSelection | null = null;
+let mountedSelectionWidget: MountedSelectionWidget | null = null;
+let mountedCommentWidgets: MountedCommentWidget[] = [];
+let commentWidgetGeneration = 0;
+let paddedCommentSide: InlineCommentSide | null = null;
 let pendingOpenPath: string | null = null;
 let toastTimer = 0;
 let readyTimer = 0;
@@ -132,6 +159,10 @@ monaco.editor.defineTheme("review-loop", {
 });
 monaco.editor.setTheme("review-loop");
 
+const COMMENT_EDITOR_HEIGHT = 128;
+const DEFAULT_EDITOR_PADDING = 8;
+const ACTIVE_EDITOR_BOTTOM_PADDING = COMMENT_EDITOR_HEIGHT + 16;
+
 const diffEditor = monaco.editor.createDiffEditor(editorEl, {
   readOnly: true,
   originalEditable: false,
@@ -150,7 +181,7 @@ const diffEditor = monaco.editor.createDiffEditor(editorEl, {
   wordWrap: "off",
   diffWordWrap: "off",
   hideUnchangedRegions: { enabled: false },
-  padding: { top: 8, bottom: 8 },
+  padding: { top: DEFAULT_EDITOR_PADDING, bottom: DEFAULT_EDITOR_PADDING },
   fontFamily: appearance.typography.codeFontFamily,
   fontSize: appearance.typography.editorFontSize,
   lineHeight: appearance.typography.editorLineHeight,
@@ -247,7 +278,9 @@ function selectPath(path: string, preferCheckpoint = false): void {
   }
   if (!inCurrentMode) return;
   saveMountedScroll();
-  clearViewZones();
+  settleActiveComment();
+  dismissTextSelection();
+  clearCommentWidgets();
   activePath = path;
   mountedFingerprint = "";
   render();
@@ -475,22 +508,27 @@ function inferLanguage(path: string): string {
   } as Record<string, string>)[ext ?? ""] ?? "plaintext";
 }
 
-function clearViewZones(): void {
-  if (activeViewZones.length === 0) return;
-  const originalEditor = diffEditor.getOriginalEditor();
-  const modifiedEditor = diffEditor.getModifiedEditor();
-  originalEditor.changeViewZones((accessor) => {
-    activeViewZones.filter((zone) => zone.editor === originalEditor).forEach((zone) => accessor.removeZone(zone.id));
-  });
-  modifiedEditor.changeViewZones((accessor) => {
-    activeViewZones.filter((zone) => zone.editor === modifiedEditor).forEach((zone) => accessor.removeZone(zone.id));
-  });
-  activeViewZones = [];
+function clearSelectionCommentWidget(): void {
+  if (mountedSelectionWidget == null) return;
+  mountedSelectionWidget.editor.removeContentWidget(mountedSelectionWidget.widget);
+  mountedSelectionWidget = null;
+}
+
+function dismissTextSelection(): void {
+  activeTextSelection = null;
+  clearSelectionCommentWidget();
+}
+
+function clearCommentWidgets(): void {
+  if (mountedCommentWidgets.length === 0) return;
+  for (const mounted of mountedCommentWidgets) mounted.editor.removeContentWidget(mounted.widget);
+  mountedCommentWidgets = [];
 }
 
 function disposeModels(): void {
   saveMountedScroll();
-  clearViewZones();
+  dismissTextSelection();
+  clearCommentWidgets();
   diffEditor.setModel(null);
   originalModel?.dispose();
   modifiedModel?.dispose();
@@ -531,11 +569,15 @@ function commentSideLabel(comment: ReviewComment): string {
 }
 
 function commentLocation(comment: ReviewComment): string {
-  if (comment.side === "file" || comment.line == null) return comment.path;
-  return `${comment.path}:${comment.line} ${commentSideLabel(comment).toLowerCase()}`;
+  if (comment.anchor.kind === "file") return comment.path;
+  const side = commentSideLabel(comment).toLowerCase();
+  if (comment.anchor.kind === "line") return `${comment.path}:${comment.anchor.line} ${side}`;
+  const anchor = comment.anchor;
+  return `${comment.path}:${anchor.startLine}:${anchor.startColumn}–${anchor.endLine}:${anchor.endColumn} ${side}`;
 }
 
 function removeComment(id: string): void {
+  if (activeCommentId === id) activeCommentId = null;
   comments = comments.filter((comment) => comment.id !== id);
   renderFeedback();
   renderRecent();
@@ -545,7 +587,7 @@ function removeComment(id: string): void {
 }
 
 function renderFeedback(): void {
-  const fileComments = comments.filter((comment) => comment.side === "file" && comment.path === activePath && comment.mode === workspace?.mode);
+  const fileComments = comments.filter((comment) => comment.anchor.kind === "file" && comment.path === activePath && comment.mode === workspace?.mode);
   const visible = fileComments.length > 0 || draft != null;
   feedbackPanelEl.classList.toggle("hidden", !visible);
   feedbackTitleEl.textContent = fileComments.length ? `File notes · ${fileComments.length}` : "File note";
@@ -575,7 +617,8 @@ function renderFeedback(): void {
 
 function openFileDraft(): void {
   if (activePath == null || workspace == null) return;
-  draft = { path: activePath, mode: workspace.mode, side: "file", line: null };
+  dismissTextSelection();
+  draft = { path: activePath, mode: workspace.mode, side: "file", anchor: { kind: "file" } };
   draftInput.value = "";
   renderFeedback();
   requestAnimationFrame(() => draftInput.focus());
@@ -593,18 +636,78 @@ function addDraft(): void {
   updateSubmitButton();
 }
 
+function isInlineComment(comment: ReviewComment): comment is InlineReviewComment {
+  return comment.side !== "file" && comment.anchor.kind !== "file";
+}
+
+function currentInlineComments(): UiInlineComment[] {
+  if (activePath == null || workspace == null) return [];
+  const path = activePath;
+  const mode = workspace.mode;
+  return comments.filter((comment): comment is UiInlineComment =>
+    comment.path === path
+    && comment.mode === mode
+    && isInlineComment(comment),
+  );
+}
+
+function activeInlineComment(): UiInlineComment | undefined {
+  return currentInlineComments().find((comment) => comment.id === activeCommentId);
+}
+
+function commentStartLine(comment: InlineReviewComment): number {
+  if (comment.anchor.kind === "line") return comment.anchor.line;
+  return comment.anchor.startLine;
+}
+
+function commentEditorLine(comment: InlineReviewComment): number {
+  if (comment.anchor.kind === "line") return comment.anchor.line;
+  return comment.anchor.endLine;
+}
+
+function commentEditorPosition(comment: InlineReviewComment, model: monaco.editor.ITextModel): monaco.Position {
+  if (comment.anchor.kind === "range") {
+    return model.validatePosition({ lineNumber: comment.anchor.endLine, column: comment.anchor.endColumn });
+  }
+  const line = Math.min(comment.anchor.line, model.getLineCount());
+  return new monaco.Position(line, model.getLineMaxColumn(line));
+}
+
+function commentEditorTitle(comment: InlineReviewComment): string {
+  if (comment.anchor.kind === "line") return `${commentSideLabel(comment)} line ${comment.anchor.line}`;
+  const anchor = comment.anchor;
+  return `${commentSideLabel(comment)} ${anchor.startLine}:${anchor.startColumn}–${anchor.endLine}:${anchor.endColumn}`;
+}
+
+function decorationsFor(side: InlineCommentSide, model: monaco.editor.ITextModel): monaco.editor.IModelDeltaDecoration[] {
+  const inlineComments = currentInlineComments();
+  const active = inlineComments.find((comment) => comment.id === activeCommentId);
+  return inlineComments
+    .filter((comment) => comment.side === side)
+    .map((comment) => {
+      if (comment.anchor.kind === "line") {
+        const line = Math.min(comment.anchor.line, model.getLineCount());
+        const markerHidden = active?.side === side && commentEditorLine(active) === line;
+        return {
+          range: new monaco.Range(line, 1, line, 1),
+          options: {
+            isWholeLine: true,
+            className: "review-comment-line",
+            glyphMarginClassName: markerHidden ? undefined : "codicon codicon-comment review-comment-glyph",
+          },
+        };
+      }
+      const anchor = comment.anchor;
+      return {
+        range: model.validateRange(new monaco.Range(anchor.startLine, anchor.startColumn, anchor.endLine, anchor.endColumn)),
+        options: { inlineClassName: "review-comment-range" },
+      };
+    });
+}
+
 function renderDecorations(): void {
-  const pathComments = comments.filter((comment) => comment.path === activePath && comment.mode === workspace?.mode && comment.line != null && comment.side !== "file");
-  const original = pathComments.filter((comment) => comment.side === "original").map((comment) => ({
-    range: new monaco.Range(comment.line!, 1, comment.line!, 1),
-    options: { isWholeLine: true, className: "review-comment-line", glyphMarginClassName: "review-comment-glyph" },
-  }));
-  const modified = pathComments.filter((comment) => comment.side === "modified").map((comment) => ({
-    range: new monaco.Range(comment.line!, 1, comment.line!, 1),
-    options: { isWholeLine: true, className: "review-comment-line", glyphMarginClassName: "review-comment-glyph" },
-  }));
-  if (originalModel) originalDecorations = diffEditor.getOriginalEditor().deltaDecorations(originalDecorations, original);
-  if (modifiedModel) modifiedDecorations = diffEditor.getModifiedEditor().deltaDecorations(modifiedDecorations, modified);
+  if (originalModel) originalDecorations = diffEditor.getOriginalEditor().deltaDecorations(originalDecorations, decorationsFor("original", originalModel));
+  if (modifiedModel) modifiedDecorations = diffEditor.getModifiedEditor().deltaDecorations(modifiedDecorations, decorationsFor("modified", modifiedModel));
 }
 
 function sizeInlineComment(container: HTMLElement, editor: monaco.editor.ICodeEditor): void {
@@ -613,15 +716,89 @@ function sizeInlineComment(container: HTMLElement, editor: monaco.editor.ICodeEd
   container.style.maxWidth = `${width}px`;
 }
 
-function inlineCommentElement(comment: UiComment, editor: monaco.editor.ICodeEditor): HTMLElement {
+function updateCommentEditorPadding(): void {
+  const nextSide = activeInlineComment()?.side ?? null;
+  if (nextSide === paddedCommentSide) return;
+  paddedCommentSide = nextSide;
+
+  const originalBottom = nextSide === "original" ? ACTIVE_EDITOR_BOTTOM_PADDING : DEFAULT_EDITOR_PADDING;
+  const modifiedBottom = nextSide === "modified" ? ACTIVE_EDITOR_BOTTOM_PADDING : DEFAULT_EDITOR_PADDING;
+  diffEditor.getOriginalEditor().updateOptions({
+    padding: { top: DEFAULT_EDITOR_PADDING, bottom: originalBottom },
+  });
+  diffEditor.getModifiedEditor().updateOptions({
+    padding: { top: DEFAULT_EDITOR_PADDING, bottom: modifiedBottom },
+  });
+}
+
+function settleActiveComment(): void {
+  if (activeCommentId == null) return;
+  const active = comments.find((comment) => comment.id === activeCommentId);
+  activeCommentId = null;
+  if (active && active.body.trim().length === 0) {
+    comments = comments.filter((comment) => comment.id !== active.id);
+  }
+  updateCommentEditorPadding();
+}
+
+function collapseInlineComment(id: string): void {
+  if (activeCommentId !== id) return;
+  settleActiveComment();
+  renderRecent();
+  renderTree();
+  updateSubmitButton();
+  syncInlineComments();
+}
+
+function editorForComment(comment: InlineReviewComment): monaco.editor.ICodeEditor {
+  return comment.side === "original" ? diffEditor.getOriginalEditor() : diffEditor.getModifiedEditor();
+}
+
+function revealCommentEditor(comment: InlineReviewComment): void {
+  const editor = editorForComment(comment);
+  const model = editor.getModel();
+  if (!model) return;
+  const position = commentEditorPosition(comment, model);
+  const positionTop = editor.getTopForPosition(position.lineNumber, position.column);
+  const positionBottom = positionTop + editor.getLineHeightForPosition(position);
+  const scrollTop = editor.getScrollTop();
+  const viewportHeight = editor.getLayoutInfo().height;
+  const editorMargin = DEFAULT_EDITOR_PADDING;
+  const requiredBottom = positionBottom + COMMENT_EDITOR_HEIGHT + editorMargin;
+
+  if (positionTop < scrollTop + editorMargin) {
+    editor.setScrollTop(Math.max(0, positionTop - editorMargin), monaco.editor.ScrollType.Immediate);
+  } else if (requiredBottom > scrollTop + viewportHeight) {
+    editor.setScrollTop(requiredBottom - viewportHeight, monaco.editor.ScrollType.Immediate);
+  }
+}
+
+function activateInlineComment(id: string): void {
+  if (activeCommentId !== id) settleActiveComment();
+  const comment = comments.find((candidate) => candidate.id === id);
+  if (!comment || !isInlineComment(comment)) return;
+  dismissTextSelection();
+  activeCommentId = id;
+  renderRecent();
+  renderTree();
+  updateSubmitButton();
+  updateCommentEditorPadding();
+  revealCommentEditor(comment);
+  syncInlineComments();
+}
+
+function inlineCommentElement(comment: UiInlineComment, editor: monaco.editor.ICodeEditor, generation: number): HTMLElement {
   const container = document.createElement("div");
   container.className = "inline-comment";
+  container.tabIndex = -1;
   sizeInlineComment(container, editor);
+
   const header = document.createElement("div");
   header.className = "inline-comment-header";
   const title = document.createElement("strong");
-  title.textContent = `${commentSideLabel(comment)} line ${comment.line}`;
+  title.textContent = commentEditorTitle(comment);
   const remove = document.createElement("button");
+  remove.type = "button";
   remove.textContent = "Delete";
   remove.addEventListener("click", () => removeComment(comment.id));
   header.append(title, remove);
@@ -639,71 +816,255 @@ function inlineCommentElement(comment: UiComment, editor: monaco.editor.ICodeEdi
     updateSubmitButton();
   });
   textarea.addEventListener("keydown", (event) => {
-    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") textarea.blur();
-    if (event.key === "Escape" && comment.body.trim().length === 0) removeComment(comment.id);
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault();
+      textarea.blur();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      textarea.blur();
+    }
+  });
+  container.addEventListener("mousedown", (event) => {
+    event.stopPropagation();
+    if (!(event.target instanceof HTMLTextAreaElement) && !(event.target instanceof HTMLButtonElement)) {
+      event.preventDefault();
+      textarea.focus();
+    }
+  });
+  container.addEventListener("focusout", () => {
+    window.setTimeout(() => {
+      if (generation !== commentWidgetGeneration || activeCommentId !== comment.id || container.contains(document.activeElement)) return;
+      collapseInlineComment(comment.id);
+    }, 0);
   });
   container.append(header, textarea);
-  if (!comment.body) setTimeout(() => textarea.focus(), 20);
+  window.setTimeout(() => {
+    if (generation === commentWidgetGeneration && activeCommentId === comment.id) textarea.focus();
+  }, 20);
   return container;
 }
 
-function syncInlineComments(): void {
-  clearViewZones();
-  if (!originalModel || !modifiedModel || activePath == null || workspace == null) return;
-  const originalEditor = diffEditor.getOriginalEditor();
-  const modifiedEditor = diffEditor.getModifiedEditor();
-  const inlineComments = comments.filter((comment) =>
-    comment.path === activePath && comment.mode === workspace!.mode && comment.side !== "file" && comment.line != null,
-  );
-  inlineComments.forEach((comment) => {
-    const editor = comment.side === "original" ? originalEditor : modifiedEditor;
-    const maxLine = editor.getModel()?.getLineCount() ?? comment.line!;
-    editor.changeViewZones((accessor) => {
-      const domNode = inlineCommentElement(comment, editor);
-      const id = accessor.addZone({
-        afterLineNumber: Math.min(comment.line!, maxLine),
-        heightInPx: 128,
-        domNode,
-      });
-      activeViewZones.push({ id, editor, domNode });
-    });
+function commentIconElement(comment: UiInlineComment): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "review-comment-icon range-comment-icon";
+  button.title = `Edit comment · ${commentEditorTitle(comment)}`;
+  button.setAttribute("aria-label", button.title);
+  button.addEventListener("mousedown", (event) => event.stopPropagation());
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    activateInlineComment(comment.id);
   });
+  return button;
+}
+
+function mountCommentWidget(
+  editor: monaco.editor.ICodeEditor,
+  comment: UiInlineComment,
+  kind: "icon" | "editor",
+  generation: number,
+): void {
+  const model = editor.getModel();
+  if (!model) return;
+
+  const expanded = kind === "editor";
+  let domNode: HTMLElement;
+  let position: monaco.Position;
+  let preference: monaco.editor.ContentWidgetPositionPreference[];
+
+  if (expanded) {
+    domNode = inlineCommentElement(comment, editor, generation);
+    position = commentEditorPosition(comment, model);
+    preference = [monaco.editor.ContentWidgetPositionPreference.BELOW];
+  } else {
+    domNode = commentIconElement(comment);
+    if (comment.anchor.kind === "range") {
+      position = model.validatePosition({
+        lineNumber: comment.anchor.startLine,
+        column: comment.anchor.startColumn,
+      });
+      preference = [
+        monaco.editor.ContentWidgetPositionPreference.ABOVE,
+        monaco.editor.ContentWidgetPositionPreference.EXACT,
+      ];
+    } else {
+      position = model.validatePosition({ lineNumber: commentStartLine(comment), column: 1 });
+      preference = [monaco.editor.ContentWidgetPositionPreference.EXACT];
+    }
+  }
+
+  const widget: monaco.editor.IContentWidget = {
+    allowEditorOverflow: false,
+    getId: () => `review-comment:${comment.id}:${kind}:${generation}`,
+    getDomNode: () => domNode,
+    getPosition: () => ({ position, preference }),
+    beforeRender: () => {
+      if (expanded) {
+        sizeInlineComment(domNode, editor);
+        return { width: editor.getLayoutInfo().contentWidth, height: COMMENT_EDITOR_HEIGHT };
+      }
+      return { width: 18, height: 18 };
+    },
+  };
+  editor.addContentWidget(widget);
+  mountedCommentWidgets.push({ editor, widget, kind, domNode });
+}
+
+function syncInlineComments(): void {
+  commentWidgetGeneration += 1;
+  const generation = commentWidgetGeneration;
+  clearCommentWidgets();
+  updateCommentEditorPadding();
+  if (!originalModel || !modifiedModel) return;
+
+  const inlineComments = currentInlineComments();
+  const active = inlineComments.find((comment) => comment.id === activeCommentId);
+  const activeLine = active ? commentEditorLine(active) : null;
+
+  for (const comment of inlineComments) {
+    if (comment.id === activeCommentId || comment.anchor.kind === "line") continue;
+    if (active && comment.side === active.side && commentStartLine(comment) === activeLine) continue;
+    mountCommentWidget(editorForComment(comment), comment, "icon", generation);
+  }
+  if (active) mountCommentWidget(editorForComment(active), active, "editor", generation);
   renderDecorations();
 }
 
-function addInlineComment(side: "original" | "modified", line: number): void {
-  if (activePath == null || workspace == null) return;
-  const existing = comments.find((comment) => comment.path === activePath && comment.mode === workspace!.mode && comment.side === side && comment.line === line);
+function addCommentAtTarget(target: Omit<InlineReviewComment, "body">): void {
+  const candidate: InlineReviewComment = { ...target, body: "" };
+  const existing = comments.find((comment) => sameReviewTarget(comment, candidate));
   if (existing) {
-    document.querySelector<HTMLTextAreaElement>(`textarea[data-comment-id="${existing.id}"]`)?.focus();
+    activateInlineComment(existing.id);
     return;
   }
-  comments.push({ id: makeCommentId(), path: activePath, mode: workspace.mode, side, line, body: "" });
-  renderRecent();
-  renderTree();
-  updateSubmitButton();
-  syncInlineComments();
-  const editor = side === "original" ? diffEditor.getOriginalEditor() : diffEditor.getModifiedEditor();
-  editor.revealLineInCenter(line);
+  const comment: UiInlineComment = { ...candidate, id: makeCommentId() };
+  comments.push(comment);
+  activateInlineComment(comment.id);
 }
 
-function installGutterComments(editor: monaco.editor.ICodeEditor, side: "original" | "modified"): void {
+function addInlineComment(side: InlineCommentSide, line: number): void {
+  if (activePath == null || workspace == null) return;
+  addCommentAtTarget({ path: activePath, mode: workspace.mode, side, anchor: { kind: "line", line } });
+}
+
+function currentTextSelection(): ActiveTextSelection | null {
+  const selection = activeTextSelection;
+  if (selection == null) return null;
+  if (selection.path !== activePath || selection.mode !== workspace?.mode) return null;
+  return selection;
+}
+
+function createSelectionCommentButton(): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "selection-comment-popover";
+  button.textContent = "Add comment";
+  button.setAttribute("aria-label", "Add a comment to the selected text");
+  button.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    addSelectionComment();
+  });
+  return button;
+}
+
+function syncSelectionCommentWidget(): void {
+  clearSelectionCommentWidget();
+  const selection = currentTextSelection();
+  if (selection == null || activeCommentId != null) return;
+
+  const editor = selection.side === "original" ? diffEditor.getOriginalEditor() : diffEditor.getModifiedEditor();
+  const model = editor.getModel();
+  if (!model) return;
+  const domNode = createSelectionCommentButton();
+  const position = model.validatePosition({
+    lineNumber: selection.anchor.startLine,
+    column: selection.anchor.startColumn,
+  });
+  const widget: monaco.editor.IContentWidget = {
+    allowEditorOverflow: false,
+    getId: () => "selection-comment",
+    getDomNode: () => domNode,
+    getPosition: () => ({
+      position,
+      preference: [
+        monaco.editor.ContentWidgetPositionPreference.ABOVE,
+        monaco.editor.ContentWidgetPositionPreference.BELOW,
+      ],
+    }),
+    beforeRender: () => ({ width: 94, height: 30 }),
+  };
+  editor.addContentWidget(widget);
+  mountedSelectionWidget = { editor, widget };
+}
+
+function captureTextSelection(editor: monaco.editor.ICodeEditor, side: InlineCommentSide): void {
+  const selection = editor.getSelection();
+  const model = editor.getModel();
+  if (selection == null || selection.isEmpty() || model == null || activePath == null || workspace == null) {
+    dismissTextSelection();
+    return;
+  }
+  activeTextSelection = {
+    path: activePath,
+    mode: workspace.mode,
+    side,
+    anchor: {
+      kind: "range",
+      startLine: selection.startLineNumber,
+      startColumn: selection.startColumn,
+      endLine: selection.endLineNumber,
+      endColumn: selection.endColumn,
+      selectedText: model.getValueInRange(selection),
+    },
+  };
+  syncSelectionCommentWidget();
+}
+
+function addSelectionComment(): void {
+  const selection = currentTextSelection();
+  if (selection == null) return;
+  dismissTextSelection();
+  addCommentAtTarget({ path: selection.path, mode: selection.mode, side: selection.side, anchor: { ...selection.anchor } });
+}
+
+function isCommentGutter(target: monaco.editor.MouseTargetType): boolean {
+  return target === monaco.editor.MouseTargetType.GUTTER_LINE_NUMBERS
+    || target === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN;
+}
+
+function installGutterComments(editor: monaco.editor.ICodeEditor, side: InlineCommentSide): void {
   let hoverDecorations: string[] = [];
   editor.onMouseMove((event) => {
     const target = event.target;
-    const gutter = target.type === monaco.editor.MouseTargetType.GUTTER_LINE_NUMBERS || target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN;
+    const gutter = isCommentGutter(target.type);
     const line = gutter ? target.position?.lineNumber : undefined;
-    hoverDecorations = editor.deltaDecorations(hoverDecorations, line ? [{
-      range: new monaco.Range(line, 1, line, 1),
-      options: { glyphMarginClassName: "review-glyph-plus" },
-    }] : []);
+    const hasLineComment = line != null && comments.some((comment) =>
+      comment.path === activePath
+      && comment.mode === workspace?.mode
+      && comment.side === side
+      && comment.anchor.kind === "line"
+      && comment.anchor.line === line,
+    );
+    const decorations: monaco.editor.IModelDeltaDecoration[] = [];
+    if (line != null && !hasLineComment) {
+      decorations.push({
+        range: new monaco.Range(line, 1, line, 1),
+        options: { glyphMarginClassName: "review-glyph-plus" },
+      });
+    }
+    hoverDecorations = editor.deltaDecorations(hoverDecorations, decorations);
   });
   editor.onMouseLeave(() => {
     hoverDecorations = editor.deltaDecorations(hoverDecorations, []);
   });
   editor.onMouseDown((event) => {
     const target = event.target;
-    const gutter = target.type === monaco.editor.MouseTargetType.GUTTER_LINE_NUMBERS || target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN;
+    const gutter = isCommentGutter(target.type);
     const line = target.position?.lineNumber ?? target.range?.startLineNumber;
     if (!gutter || line == null) return;
     try {
@@ -713,12 +1074,54 @@ function installGutterComments(editor: monaco.editor.ICodeEditor, side: "origina
     }
   });
 }
+
+function installTextSelection(editor: monaco.editor.ICodeEditor, side: InlineCommentSide): void {
+  let mouseSelecting = false;
+  const finishMouseSelection = (): void => {
+    if (!mouseSelecting) return;
+    mouseSelecting = false;
+    if (editor.hasTextFocus()) captureTextSelection(editor, side);
+    else dismissTextSelection();
+  };
+
+  editor.onMouseDown((event) => {
+    const target = event.target.type;
+    mouseSelecting = target === monaco.editor.MouseTargetType.CONTENT_TEXT
+      || target === monaco.editor.MouseTargetType.CONTENT_EMPTY;
+    if (mouseSelecting) dismissTextSelection();
+  });
+  editor.onMouseUp(finishMouseSelection);
+  window.addEventListener("mouseup", finishMouseSelection);
+  editor.onDidFocusEditorText(() => {
+    if (!mouseSelecting) captureTextSelection(editor, side);
+  });
+  editor.onDidBlurEditorText(() => {
+    window.setTimeout(() => {
+      if (!editor.hasTextFocus() && activeTextSelection?.side === side) dismissTextSelection();
+    }, 0);
+  });
+  editor.onDidChangeCursorSelection(() => {
+    if (editor.hasTextFocus() && !mouseSelecting) captureTextSelection(editor, side);
+  });
+}
+
+function layoutCommentWidgets(editor: monaco.editor.ICodeEditor): void {
+  for (const mounted of mountedCommentWidgets) {
+    if (mounted.editor !== editor) continue;
+    if (mounted.kind === "editor") sizeInlineComment(mounted.domNode, editor);
+    editor.layoutContentWidget(mounted.widget);
+  }
+  if (mountedSelectionWidget?.editor === editor) editor.layoutContentWidget(mountedSelectionWidget.widget);
+}
+
 const originalEditor = diffEditor.getOriginalEditor();
 const modifiedEditor = diffEditor.getModifiedEditor();
 installGutterComments(originalEditor, "original");
 installGutterComments(modifiedEditor, "modified");
-originalEditor.onDidLayoutChange(() => activeViewZones.filter((zone) => zone.editor === originalEditor).forEach((zone) => sizeInlineComment(zone.domNode, originalEditor)));
-modifiedEditor.onDidLayoutChange(() => activeViewZones.filter((zone) => zone.editor === modifiedEditor).forEach((zone) => sizeInlineComment(zone.domNode, modifiedEditor)));
+installTextSelection(originalEditor, "original");
+installTextSelection(modifiedEditor, "modified");
+originalEditor.onDidLayoutChange(() => layoutCommentWidgets(originalEditor));
+modifiedEditor.onDidLayoutChange(() => layoutCommentWidgets(modifiedEditor));
 
 window.__reviewReceive = (message: HostMessage): void => {
   if (message.type === "workspace") {
@@ -734,6 +1137,11 @@ window.__reviewReceive = (message: HostMessage): void => {
       activePath = workspace.recentPaths.find((path) => workspace!.files.some((file) => file.path === path)) ?? workspace.files[0]?.path ?? null;
     }
     const file = activeFile();
+    if (previousPath !== activePath || previousMode !== workspace.mode) {
+      settleActiveComment();
+      dismissTextSelection();
+      clearCommentWidgets();
+    }
     if (previousPath !== activePath || previousMode !== workspace.mode || file?.fingerprint !== mountedFingerprint) mountedFingerprint = "";
     render();
     requestActiveFile();
@@ -750,6 +1158,8 @@ window.__reviewReceive = (message: HostMessage): void => {
   if (message.type === "review-submitted") {
     comments = [];
     draft = null;
+    activeCommentId = null;
+    dismissTextSelection();
     submitButton.disabled = false;
     renderFeedback();
     renderRecent();
@@ -760,14 +1170,16 @@ window.__reviewReceive = (message: HostMessage): void => {
   }
 };
 
-checkpointButton.addEventListener("click", () => {
+function requestMode(mode: ReviewMode): void {
   saveMountedScroll();
-  send({ type: "set-mode", mode: "checkpoint" as ReviewMode });
-});
-headButton.addEventListener("click", () => {
-  saveMountedScroll();
-  send({ type: "set-mode", mode: "head" as ReviewMode });
-});
+  settleActiveComment();
+  dismissTextSelection();
+  syncInlineComments();
+  send({ type: "set-mode", mode });
+}
+
+checkpointButton.addEventListener("click", () => requestMode("checkpoint"));
+headButton.addEventListener("click", () => requestMode("head"));
 searchInput.addEventListener("input", () => { renderRecent(); renderTree(); });
 lineWrapButton.addEventListener("click", () => {
   const enabled = lineWrapButton.getAttribute("aria-pressed") !== "true";
@@ -798,6 +1210,8 @@ draftInput.addEventListener("keydown", (event) => {
 });
 submitButton.addEventListener("click", () => {
   if (submitButton.disabled) return;
+  settleActiveComment();
+  dismissTextSelection();
   submitButton.disabled = true;
   submitButton.textContent = "Saving…";
   send({ type: "submit-review", comments });

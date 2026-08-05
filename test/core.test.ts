@@ -7,6 +7,8 @@ import { promisify } from "node:util";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { composeFeedback } from "../src/prompt.js";
+import type { ReviewComment } from "../src/types.js";
+import { sameReviewTarget } from "../src/review-comments.js";
 import { getReviewHtmlPath } from "../src/ui.js";
 import { createCheckpoint, decodeStored, parsePorcelainPaths, scanAgainstCheckpoint } from "../src/git.js";
 import { WorkspaceModel } from "../src/workspace.js";
@@ -38,18 +40,61 @@ test("parses porcelain paths including renames", () => {
 
 test("formats compact actionable feedback", () => {
   assert.equal(composeFeedback([
-    { path: "src/a.ts", side: "modified", line: 12, body: "Handle the empty case." },
-    { path: "README.md", side: "file", line: null, body: "Clarify setup.\nAdd an example." },
+    { path: "src/a.ts", side: "modified", anchor: { kind: "line", line: 12 }, body: "Handle the empty case." },
+    {
+      path: "src/range.ts",
+      side: "original",
+      mode: "head",
+      anchor: {
+        kind: "range",
+        startLine: 4,
+        startColumn: 3,
+        endLine: 5,
+        endColumn: 8,
+        selectedText: "const value = first\n  + second;",
+      },
+      body: "Extract this calculation.",
+    },
+    { path: "README.md", side: "file", anchor: { kind: "file" }, body: "Clarify setup.\nAdd an example." },
   ]), [
     "Please address the following review feedback:",
     "",
     "1. src/a.ts:12 (current)",
     "   Handle the empty case.",
     "",
-    "2. README.md",
+    "2. src/range.ts:4:3-5:8 (HEAD)",
+    "   Selected text:",
+    "       const value = first",
+    "         + second;",
+    "   Extract this calculation.",
+    "",
+    "3. README.md",
     "   Clarify setup.",
     "   Add an example.",
   ].join("\n"));
+});
+
+test("distinguishes multiple comment ranges on one line", () => {
+  const base = {
+    path: "src/a.ts",
+    mode: "checkpoint" as const,
+    side: "modified" as const,
+    body: "",
+  };
+  const rangeComment = (startColumn: number, endColumn: number, selectedText: string): ReviewComment => ({
+    ...base,
+    anchor: { kind: "range", startLine: 8, startColumn, endLine: 8, endColumn, selectedText },
+  });
+  const first = rangeComment(2, 6, "first");
+  const duplicate = rangeComment(2, 6, "first");
+  const second = rangeComment(10, 14, "next");
+  const overlapping = rangeComment(4, 12, "overlap");
+  const wholeLine: ReviewComment = { ...base, anchor: { kind: "line", line: 8 } };
+
+  assert.equal(sameReviewTarget(first, duplicate), true);
+  assert.equal(sameReviewTarget(first, second), false);
+  assert.equal(sameReviewTarget(first, overlapping), false);
+  assert.equal(sameReviewTarget(first, wholeLine), false);
 });
 
 test("bundled webview is self-contained and syntactically valid", async () => {

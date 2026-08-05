@@ -194,10 +194,44 @@ button { color: inherit; }
 .toast.visible { opacity: 1; transform: translateY(0); }
 
 .monaco-diff-editor, .monaco-editor { --vscode-focusBorder: transparent; }
-.monaco-editor .view-zones { z-index: 10; }
 .monaco-editor .margin-view-overlays .line-numbers { cursor: pointer; }
 .monaco-editor .review-comment-line { background: var(--color-comments-highlight-background); }
-.monaco-editor .review-comment-glyph { background: var(--color-comments-marker); border-radius: 50%; width: 7px !important; height: 7px !important; margin: 6px 0 0 5px; }
+.monaco-editor .review-comment-range { border-bottom: 1px solid var(--color-comments-marker); background: var(--color-comments-highlight-background); }
+.monaco-editor .review-comment-glyph {
+  width: 16px !important;
+  height: 16px !important;
+  margin: 2px 0 0 1px;
+  border-radius: 3px;
+  background: var(--color-comments-marker);
+  color: var(--color-comments-add-button-text);
+  cursor: pointer;
+  font-size: 12px !important;
+  line-height: 16px !important;
+  text-align: center;
+}
+.selection-comment-popover {
+  position: relative;
+  z-index: 50;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--color-shell-border);
+  border-radius: 6px;
+  outline: 0;
+  background-color: var(--color-shell-toast-background);
+  color: var(--color-text-primary);
+  box-shadow: 0 5px 18px var(--color-shell-toast-shadow);
+  opacity: 1 !important;
+  cursor: pointer;
+  font-size: var(--font-size-small);
+  font-weight: 650;
+  white-space: nowrap;
+}
+.selection-comment-popover:hover,
+.selection-comment-popover:focus-visible {
+  border-color: var(--color-controls-primary-border);
+  background-color: var(--color-controls-primary-background);
+  color: var(--color-controls-primary-text);
+}
 .monaco-editor .review-glyph-plus {
   width: 16px !important;
   height: 16px !important;
@@ -212,7 +246,41 @@ button { color: inherit; }
   background-size: 8px 1.5px, 1.5px 8px;
   cursor: pointer;
 }
-.inline-comment { position: sticky; left: 0; height: 128px; padding: 8px 12px 10px; border-top: 1px solid var(--color-comments-inline-border); border-bottom: 1px solid var(--color-shell-border); background: var(--color-comments-inline-background); }
+.review-comment-icon {
+  position: relative;
+  z-index: 20;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--color-comments-inline-border);
+  border-radius: 5px;
+  background: var(--color-comments-add-button-background);
+  box-shadow: 0 2px 7px var(--color-shell-toast-shadow);
+  cursor: pointer;
+}
+.review-comment-icon::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  width: 8px;
+  height: 6px;
+  border: 1px solid var(--color-comments-add-button-text);
+  border-radius: 2px;
+}
+.review-comment-icon::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 10px;
+  width: 3px;
+  height: 3px;
+  border-left: 1px solid var(--color-comments-add-button-text);
+  transform: skewY(-35deg);
+}
+.review-comment-icon:hover { filter: brightness(1.08); }
+.review-comment-icon.range-comment-icon { transform: translate(-2px, 0); }
+.inline-comment { position: relative; z-index: 40; height: 128px; padding: 8px 12px 10px; border: 1px solid var(--color-comments-inline-border); background: var(--color-comments-inline-background); box-shadow: 0 10px 28px var(--color-shell-toast-shadow); }
 .inline-comment-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
 .inline-comment-header strong { color: var(--color-text-primary); font-size: var(--font-size-small); font-weight: 650; }
 .inline-comment-header button { border: 0; background: transparent; color: var(--color-text-secondary); cursor: pointer; font-size: var(--font-size-small); }

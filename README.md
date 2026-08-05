@@ -29,11 +29,13 @@ The command returns immediately; it does not replace pi's editor. Running `/diff
 1. Open the window with `/diff-review`.
 2. Select a file from **Recently Changed** or the **Files** tree.
 3. Review its diff.
-4. Hover a line number to reveal a `+`, then click it to add an inline comment.
+4. Add inline feedback in either diff pane.
+   - Hover a line number and click its `+` to comment on the whole line.
+   - Select text, then click the floating **Add comment** action to anchor feedback to that exact character range. The action appears after a mouse selection completes or as soon as a keyboard selection starts.
    - The left pane refers to **Reviewed** content in `Since review` mode or **HEAD** in `vs HEAD` mode.
    - The right pane refers to the **Current** on-disk content.
-   - Inline comments work on either pane.
-5. Use **Add file note** for feedback that is not tied to a line.
+   - The comment editor floats below its anchored line without shifting the diff. Leaving the editor collapses a saved comment to an icon; click the icon to edit it again.
+5. Use **Add file note** for feedback that is not tied to a line or selection.
 6. Comment-count badges appear beside files in both sidebar sections.
 7. Click the review button in the top-right.
    - All files currently changed since the checkpoint are marked reviewed, whether or not each file was opened.
@@ -97,7 +99,7 @@ The review window opens only after the watcher is ready. If watcher startup or r
 - Scroll positions are remembered separately for each file and diff mode, including horizontal offsets
 - A file opened for the first time starts at the top-left
 
-Inline comments remain attached to the recorded pane and line number. If that file changes again before the review is submitted, verify that the comment still refers to the intended code.
+Inline comments remain attached to the recorded pane and captured line or character range. Range feedback also includes the selected text in the composed prompt. If that file changes again before the review is submitted, verify that the comment still refers to the intended code.
 
 ## Session persistence
 
