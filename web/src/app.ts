@@ -14,7 +14,7 @@ import "monaco-editor/languages/definitions/shell/register.js";
 import "monaco-editor/languages/definitions/typescript/register.js";
 import "monaco-editor/languages/definitions/yaml/register.js";
 import { sameReviewTarget } from "../../src/review-comments.js";
-import type { ChangedFile, FileContents, HostMessage, LineCommentAnchor, RangeCommentAnchor, ReviewComment, ReviewMode, WorkspaceState } from "../../src/types.js";
+import type { ChangedFile, FileCommentAnchor, FileContents, HostMessage, LineCommentAnchor, RangeCommentAnchor, ReviewComment, ReviewMode, WorkspaceState } from "../../src/types.js";
 import { appearance, applyAppearance } from "./appearance.js";
 
 declare global {
@@ -61,11 +61,10 @@ const editorEl = byId("editor");
 const feedbackPanelEl = byId("feedback-panel");
 const feedbackTitleEl = byId("feedback-title");
 const commentListEl = byId("comment-list");
-const draftRowEl = byId("draft-row");
-const draftLocationEl = byId("draft-location");
-const draftInput = byId<HTMLTextAreaElement>("draft-input");
-const addCommentButton = byId<HTMLButtonElement>("add-comment");
-const cancelDraftButton = byId<HTMLButtonElement>("cancel-draft");
+const fileCommentEditorEl = byId("file-comment-editor");
+const fileCommentLocationEl = byId("file-comment-location");
+const fileCommentInput = byId<HTMLTextAreaElement>("file-comment-input");
+const deleteFileCommentButton = byId<HTMLButtonElement>("delete-file-comment");
 const toastEl = byId("toast");
 
 let workspace: WorkspaceState | null = null;
@@ -81,8 +80,13 @@ type InlineReviewComment = ReviewComment & {
   side: InlineCommentSide;
   anchor: LineCommentAnchor | RangeCommentAnchor;
 };
+type FileReviewComment = ReviewComment & {
+  side: "file";
+  anchor: FileCommentAnchor;
+};
 type UiComment = ReviewComment & { id: string };
 type UiInlineComment = UiComment & InlineReviewComment;
+type UiFileComment = UiComment & FileReviewComment;
 interface MountedCommentWidget {
   editor: monaco.editor.ICodeEditor;
   widget: monaco.editor.IContentWidget;
@@ -107,7 +111,6 @@ interface ScrollPosition {
 }
 
 let comments: UiComment[] = [];
-let draft: Omit<UiComment, "body" | "id"> | null = null;
 let activeCommentId: string | null = null;
 let activeTextSelection: ActiveTextSelection | null = null;
 let mountedSelectionWidget: MountedSelectionWidget | null = null;
@@ -586,15 +589,54 @@ function removeComment(id: string): void {
   syncInlineComments();
 }
 
+function isFileComment(comment: ReviewComment): comment is FileReviewComment {
+  return comment.side === "file" && comment.anchor.kind === "file";
+}
+
+function currentFileComments(): UiFileComment[] {
+  if (activePath == null || workspace == null) return [];
+  const path = activePath;
+  const mode = workspace.mode;
+  return comments.filter((comment): comment is UiFileComment =>
+    comment.path === path
+    && comment.mode === mode
+    && isFileComment(comment),
+  );
+}
+
+function activeFileComment(): UiFileComment | undefined {
+  return currentFileComments().find((comment) => comment.id === activeCommentId);
+}
+
 function renderFeedback(): void {
-  const fileComments = comments.filter((comment) => comment.anchor.kind === "file" && comment.path === activePath && comment.mode === workspace?.mode);
-  const visible = fileComments.length > 0 || draft != null;
-  feedbackPanelEl.classList.toggle("hidden", !visible);
+  const fileComments = currentFileComments();
+  const active = fileComments.find((comment) => comment.id === activeCommentId);
+  feedbackPanelEl.classList.toggle("hidden", fileComments.length === 0);
   feedbackTitleEl.textContent = fileComments.length ? `File notes · ${fileComments.length}` : "File note";
   commentListEl.replaceChildren();
-  fileComments.forEach((comment) => {
+  const activeIndex = active ? fileComments.indexOf(active) : -1;
+  fileCommentEditorEl.classList.toggle("hidden", active == null);
+  fileCommentEditorEl.classList.toggle("first", activeIndex === 0);
+  fileCommentEditorEl.style.order = String(activeIndex);
+  if (active) {
+    fileCommentLocationEl.textContent = commentLocation(active);
+    if (fileCommentInput.dataset.commentId !== active.id || fileCommentInput.value !== active.body) {
+      fileCommentInput.value = active.body;
+    }
+    fileCommentInput.dataset.commentId = active.id;
+  } else {
+    delete fileCommentInput.dataset.commentId;
+    fileCommentInput.value = "";
+  }
+
+  fileComments.forEach((comment, index) => {
+    if (comment.id === active?.id) return;
     const row = document.createElement("div");
-    row.className = "comment";
+    row.className = `comment editable${index === 0 ? " first" : ""}`;
+    row.style.order = String(index);
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
+    row.title = "Edit file note";
     const location = document.createElement("div");
     location.className = "comment-location";
     location.textContent = commentLocation(comment);
@@ -603,37 +645,67 @@ function renderFeedback(): void {
     body.className = "comment-body";
     body.textContent = comment.body;
     const remove = document.createElement("button");
+    remove.type = "button";
     remove.textContent = "×";
     remove.title = "Delete note";
-    remove.addEventListener("click", () => removeComment(comment.id));
+    remove.setAttribute("aria-label", `Delete file note for ${comment.path}`);
+    remove.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    remove.addEventListener("click", (event) => {
+      event.stopPropagation();
+      removeComment(comment.id);
+    });
     row.append(location, body, remove);
+    row.addEventListener("click", () => activateFileComment(comment.id));
+    row.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      activateFileComment(comment.id);
+    });
     commentListEl.append(row);
   });
-
-  draftRowEl.classList.toggle("hidden", draft == null);
-  cancelDraftButton.classList.toggle("hidden", draft == null);
-  if (draft != null) draftLocationEl.textContent = commentLocation({ ...draft, body: "" });
 }
 
-function openFileDraft(): void {
-  if (activePath == null || workspace == null) return;
+function activateFileComment(id: string): void {
+  if (activeCommentId !== id) settleActiveComment();
+  const comment = comments.find((candidate): candidate is UiFileComment => candidate.id === id && isFileComment(candidate));
+  if (!comment) return;
   dismissTextSelection();
-  draft = { path: activePath, mode: workspace.mode, side: "file", anchor: { kind: "file" } };
-  draftInput.value = "";
-  renderFeedback();
-  requestAnimationFrame(() => draftInput.focus());
-}
-
-function addDraft(): void {
-  const body = draftInput.value.trim();
-  if (draft == null || !body) return;
-  comments.push({ ...draft, id: makeCommentId(), body });
-  draft = null;
-  draftInput.value = "";
+  activeCommentId = id;
   renderFeedback();
   renderRecent();
   renderTree();
   updateSubmitButton();
+  syncInlineComments();
+  requestAnimationFrame(() => {
+    if (activeCommentId === id) fileCommentInput.focus();
+  });
+}
+
+function openFileComment(): void {
+  if (activePath == null || workspace == null) return;
+  const comment: UiFileComment = {
+    id: makeCommentId(),
+    path: activePath,
+    mode: workspace.mode,
+    side: "file",
+    anchor: { kind: "file" },
+    body: "",
+  };
+  comments.push(comment);
+  activateFileComment(comment.id);
+}
+
+function collapseFileComment(id: string): void {
+  if (activeCommentId !== id) return;
+  settleActiveComment();
+  renderFeedback();
+  renderRecent();
+  renderTree();
+  updateSubmitButton();
+  syncInlineComments();
 }
 
 function isInlineComment(comment: ReviewComment): comment is InlineReviewComment {
@@ -1157,7 +1229,6 @@ window.__reviewReceive = (message: HostMessage): void => {
   }
   if (message.type === "review-submitted") {
     comments = [];
-    draft = null;
     activeCommentId = null;
     dismissTextSelection();
     submitButton.disabled = false;
@@ -1191,21 +1262,33 @@ lineWrapButton.addEventListener("click", () => {
   // higher-priority override too so both nested editors receive the toggle.
   diffEditor.updateOptions({ diffWordWrap: wordWrap, wordWrapOverride2: wordWrap });
 });
-fileCommentButton.addEventListener("click", openFileDraft);
-addCommentButton.addEventListener("click", addDraft);
-cancelDraftButton.addEventListener("click", () => {
-  draft = null;
-  draftInput.value = "";
-  renderFeedback();
+fileCommentButton.addEventListener("click", openFileComment);
+deleteFileCommentButton.addEventListener("mousedown", (event) => {
+  // Keep the textarea focused until the click runs. Otherwise its deferred
+  // focusout handler can collapse the editor and remove this button first.
+  event.preventDefault();
 });
-draftInput.addEventListener("keydown", (event) => {
-  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+deleteFileCommentButton.addEventListener("click", () => {
+  const active = activeFileComment();
+  if (active) removeComment(active.id);
+});
+fileCommentInput.addEventListener("input", () => {
+  const active = activeFileComment();
+  if (!active) return;
+  active.body = fileCommentInput.value;
+  updateSubmitButton();
+});
+fileCommentInput.addEventListener("focusout", () => {
+  const id = fileCommentInput.dataset.commentId;
+  window.setTimeout(() => {
+    if (!id || activeCommentId !== id || fileCommentInput === document.activeElement) return;
+    collapseFileComment(id);
+  }, 0);
+});
+fileCommentInput.addEventListener("keydown", (event) => {
+  if (((event.metaKey || event.ctrlKey) && event.key === "Enter") || event.key === "Escape") {
     event.preventDefault();
-    addDraft();
-  }
-  if (event.key === "Escape") {
-    draft = null;
-    renderFeedback();
+    fileCommentInput.blur();
   }
 });
 submitButton.addEventListener("click", () => {

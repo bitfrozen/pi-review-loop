@@ -69,15 +69,15 @@
         <section id="feedback-panel" class="feedback-panel hidden">
           <div class="feedback-header">
             <strong id="feedback-title">Feedback</strong>
-            <button id="cancel-draft" class="icon-button" title="Close">×</button>
           </div>
-          <div id="comment-list" class="comment-list"></div>
-          <div id="draft-row" class="draft-row hidden">
-            <div id="draft-location" class="draft-location"></div>
-            <textarea id="draft-input" rows="3" placeholder="Leave actionable feedback…" spellcheck="false" autocorrect="off" autocapitalize="off"></textarea>
-            <div class="draft-actions">
-              <span>⌘↵ to add</span>
-              <button id="add-comment" class="primary small">Add comment</button>
+          <div class="comment-stack">
+            <div id="comment-list" class="comment-list"></div>
+            <div id="file-comment-editor" class="file-comment-editor hidden">
+              <div class="file-comment-editor-header">
+                <div id="file-comment-location" class="file-comment-location"></div>
+                <button id="delete-file-comment" class="file-comment-delete" type="button">Delete</button>
+              </div>
+              <textarea id="file-comment-input" rows="3" placeholder="Leave actionable feedback…" spellcheck="false" autocorrect="off" autocapitalize="off"></textarea>
             </div>
           </div>
         </section>

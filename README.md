@@ -35,7 +35,7 @@ The command returns immediately; it does not replace pi's editor. Running `/diff
    - The left pane refers to **Reviewed** content in `Since review` mode or **HEAD** in `vs HEAD` mode.
    - The right pane refers to the **Current** on-disk content.
    - The comment editor floats below its anchored line without shifting the diff. Leaving the editor collapses a saved comment to an icon; click the icon to edit it again.
-5. Use **Add file note** for feedback that is not tied to a line or selection.
+5. Use **Add file note** for feedback that is not tied to a line or selection. Leaving the editor saves and collapses a non-empty note; click a saved note to edit it again, or use its `×` or **Delete** while editing to remove it.
 6. Comment-count badges appear beside files in both sidebar sections.
 7. Click the review button in the top-right.
    - All files currently changed since the checkpoint are marked reviewed, whether or not each file was opened.
