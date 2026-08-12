@@ -99,7 +99,7 @@ The review window opens only after the watcher is ready. If watcher startup or r
 - Scroll positions are remembered separately for each file and diff mode, including horizontal offsets
 - A file opened for the first time starts at the top-left
 
-Inline comments remain attached to the recorded pane and captured line or character range. Range feedback also includes the selected text in the composed prompt. If that file changes again before the review is submitted, verify that the comment still refers to the intended code.
+Inline comments remain attached to the recorded pane and captured line or character range. The composed prompt identifies range feedback by its exact line and column coordinates without repeating the selected text. If that file changes again before the review is submitted, verify that the comment still refers to the intended code.
 
 ## Session persistence
 
